@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>WebAuthn PRF Demo</title>
+  </head>
+  <body>
+      <h1>WebAuthn PRF Demo</h1>
+      <form id="registerForm">
+          <input type="text" id="registerUsername" placeholder="Username" required>
+          <button type="submit">Register</button>
+      </form>
+      <form id="authenticateForm">
+          <input type="text" id="authenticateUsername" placeholder="Username" required>
+          <button type="submit">Authenticate</button>
+      </form>
+      <div id="result"></div>
+  
+      <!-- New section for displaying and removing passkeys -->
+      <div id="passkeysSection" style="display:none;">
+          <h2>Your Passkeys</h2>
+          <ul id="passkeys"></ul>
+      </div>
+  
+      <script>
+          const firstSalt = new Uint8Array(new Array(32).fill(1)).buffer;
+          let currentUsername = '';
+  
+          function base64urlToUint8Array(base64url) {
+              const padding = '='.repeat((4 - base64url.length % 4) % 4);
+              const base64 = (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+              const rawData = atob(base64);
+              return new Uint8Array(rawData.split('').map(char => char.charCodeAt(0)));
+          }
+  
+          function uint8ArrayToBase64url(uint8Array) {
+              return btoa(String.fromCharCode.apply(null, uint8Array))
+                  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+          }
+  
+          async function register() {
+              const username = document.getElementById('registerUsername').value;
+              currentUsername = username;
+  
+              // Get registration options
+              const optionsResponse = await fetch('/register/options', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({username})
+              });
+              const options = await optionsResponse.json();
+              
+              options.challenge = base64urlToUint8Array(options.challenge);
+              options.user.id = base64urlToUint8Array(options.user.id);
+              options.extensions.prf.eval.first = base64urlToUint8Array(options.extensions.prf.eval.first);
+              
+              const credential = await navigator.credentials.create({publicKey: options});
+              
+              const extensionResults = credential.getClientExtensionResults();
+              const prfResult = extensionResults.prf.results.first;
+  
+              // Complete registration
+              const registerResponse = await fetch('/register', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({
+                      username,
+                      prfResult: uint8ArrayToBase64url(new Uint8Array(prfResult)),
+                      credential: {
+                          id: credential.id,
+                          rawId: uint8ArrayToBase64url(new Uint8Array(credential.rawId)),
+                          type: credential.type,
+                          response: {
+                              attestationObject: uint8ArrayToBase64url(new Uint8Array(credential.response.attestationObject)),
+                              clientDataJSON: uint8ArrayToBase64url(new Uint8Array(credential.response.clientDataJSON))
+                          }
+                      }
+                  })
+              });
+              
+              const result = await registerResponse.json();
+              document.getElementById('result').textContent = result.status === 'success' ? 'Registration successful' : 'Registration failed';
+          }
+  
+          async function authenticate() {
+              const username = document.getElementById('authenticateUsername').value;
+              currentUsername = username;
+  
+              // Get authentication options
+              const optionsResponse = await fetch('/authenticate', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({username})
+              });
+              const options = await optionsResponse.json();
+              
+              options.challenge = base64urlToUint8Array(options.challenge);
+              options.allowCredentials = options.allowCredentials.map(cred => ({
+                  ...cred,
+                  id: base64urlToUint8Array(cred.id)
+              }));
+              options.extensions.prf.eval.first = base64urlToUint8Array(options.extensions.prf.eval.first);
+              
+              const assertion = await navigator.credentials.get({publicKey: options});
+              
+              const extensionResults = assertion.getClientExtensionResults();
+              const prfResult = extensionResults.prf.results.first;
+  
+              // Complete authentication
+              const authResponse = await fetch('/authenticate/complete', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({
+                      username,
+                      prfResult: uint8ArrayToBase64url(new Uint8Array(prfResult))
+                  })
+              });
+              
+              const result = await authResponse.json();
+              document.getElementById('result').textContent = result.message;
+  
+                  // display passkeys after successful authentication:
+              if (result.status === 'success') {
+                  await displayPasskeys();
+              }
+          }
+  
+          async function fetchPasskeys() {
+              const response = await fetch('/get_passkeys', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({username: currentUsername})
+              });
+              const result = await response.json();
+              return result.passkeys;
+          }
+  
+          async function displayPasskeys() {
+              const passkeys = await fetchPasskeys();
+              const passkeyslist = document.getElementById('passkeys');
+              passkeyslist.innerHTML = '';
+              passkeys.forEach(passkey => {
+                  const li = document.createElement('li');
+                  li.textContent = `Passkey ID: ${passkey.id.slice(0, 10)}...`;
+                  const removeButton = document.createElement('button');
+                  removeButton.textContent = 'Remove';
+                  removeButton.onclick = () => removePasskey(passkey.id);
+                  li.appendChild(removeButton);
+                  passkeyslist.appendChild(li);
+              });
+              document.getElementById('passkeysSection').style.display = 'block';
+          }
+  
+          async function removePasskey(credentialId) {
+              const excluded = await excludeCredential(credentialId);
+              if (!excluded) {
+                  document.getElementById('result').textContent = 'Failed to remove passkey from authenticator';
+                  return;
+              }
+  
+              const response = await fetch('/remove_passkey', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({
+                      username: currentUsername,
+                      credentialId: credentialId
+                  })
+              });
+              const result = await response.json();
+              if (result.status === 'success') {
+                  document.getElementById('result').textContent = 'Passkey removed successfully from both authenticator and server';
+                  await displayPasskeys();
+              } else {
+                  document.getElementById('result').textContent = 'Failed to remove passkey from server';
+              }
+          }
+  
+          async function excludeCredential(credentialId) {
+              const response = await fetch('/exclude_credential', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({
+                      username: currentUsername,
+                      credentialId: credentialId
+                  })
+              });
+              const options = await response.json();
+              
+              options.challenge = base64urlToUint8Array(options.challenge);
+              options.user.id = base64urlToUint8Array(options.user.id);
+              options.excludeCredentials = options.excludeCredentials.map(cred => ({
+                  ...cred,
+                  id: base64urlToUint8Array(cred.id)
+              }));
+              
+              try {
+                  await navigator.credentials.create({publicKey: options});
+                  console.log('Credential excluded successfully');
+                  return true;
+              } catch (error) {
+                  console.error('Failed to exclude credential:', error);
+                  return false;
+              }
+          }
+  
+          document.getElementById('registerForm').addEventListener('submit', async (e) => {
+              e.preventDefault();
+              await register();
+          });
+  
+          document.getElementById('authenticateForm').addEventListener('submit', async (e) => {
+              e.preventDefault();
+              await authenticate();
+          });
+      </script>
+  </body>
+</html>
