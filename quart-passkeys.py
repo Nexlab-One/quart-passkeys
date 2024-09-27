@@ -1,11 +1,13 @@
-from quart import Quart, render_template, request, jsonify
-import base64
+# Imports
 import os
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+import base64
+from quart import Quart, render_template, request, jsonify
 from nacl.utils import random
 from nacl.secret import SecretBox
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+# Quart App
 app = Quart(__name__)
 
 # In-memory storage for user credentials and encrypted data
